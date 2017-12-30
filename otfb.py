@@ -8,6 +8,7 @@ import argparse
 import sqlite3
 import tweepy
 import logging
+import itertools
 
 logging.basicConfig()
 logger = logging.getLogger()
@@ -35,11 +36,15 @@ def tweet_sql_values_generator(tweets):
     """Generate values tuple for SQL INSERT statement from list of tweet objects."""
     twitter = get_twitter_api()
     user = twitter.me()
+    i = 0
     for tweet in tweets:
-        yield (tweet.id, tweet.created_at, tweet.user.id, tweet.text, tweet.favorited, tweet.retweeted, tweet.user.id == user.id)
+        i += 1
+        yield (tweet.id, tweet.created_at, tweet.user.id, tweet.text, tweet.favorited, tweet.retweeted, tweet.user.id == user.id and not tweet.retweeted)
+    logger.debug("Processed %d tweets", i)
 
 ### Tweet acquisition ###
 def get_timeline():
+    """Get timeline. Fetch from latest stored tweet."""
     dbc = db.cursor()
     dbc.execute("SELECT MAX(id) FROM tweets")
     max_id = dbc.fetchone()[0]
@@ -48,14 +53,29 @@ def get_timeline():
     else:
         logger.debug("Fetching as much timeline tweets as possible")
     twitter = get_twitter_api()
-    timeline = tweepy.Cursor(twitter.home_timeline, count=args.fetchcount, since_id=max_id).items(args.max_timeline_tweets)
-    return timeline
+    return tweepy.Cursor(twitter.home_timeline, count=args.fetchcount, since_id=max_id).items(args.max_timeline_tweets)
+
+def get_favorites():
+    twitter = get_twitter_api()
+    """Get user favorites"""
+    return tweepy.Cursor(twitter.favorites).items(args.max_favorites)
+
+def get_own():
+    twitter = get_twitter_api()
+    """Get user tweets"""
+    return tweepy.Cursor(twitter.user_timeline, count=args.fetchcount).items(args.max_own_tweets)
 
 ### Commands ###
 def cmd_gettweets():
     # Fetch
-    if not any([args.favorites, args.retweets, args.own, args.all]):
-        tweets = get_timeline()
+    timeline = get_timeline()
+    favorites = []
+    own = []
+    if args.favorites or args.all:
+        favorites = get_favorites()
+    if args.own or args.all:
+        own = get_own()
+    tweets = itertools.chain(timeline, favorites, own)
 
     # Store
     dbc = db.cursor()
@@ -71,13 +91,14 @@ argparser.add_argument('--consumer-secret', help="Twitter API Consumer Secret (n
 argparser.add_argument('--access-token', help="Twitter API Access Token (not recommended - sensible data may be stored in shell history!)")
 argparser.add_argument('--access-token-secret', help="Twitter API Access Token Secret (not recommended - sensible data may be stored in shell history!)")
 argparser.add_argument('--fetchcount', '-n', type=int, default=200, help="Number of tweets fetched per API request (Default: %(default)d)")
-argparser.add_argument('--max-timeline-tweets', '-m', type=int, default=25000, help="Maximum number of fetched tweets (default: %(default)d)")
+argparser.add_argument('--max-timeline-tweets', '-T', type=int, default=25000, help="Maximum number of fetched tweets (default: %(default)d)")
+argparser.add_argument('--max-favorites', '-F', type=int, default=5000, help="Maximum number of fetched favorites (default: %(default)d)")
+argparser.add_argument('--max-own-tweets', '-O', type=int, default=5000, help="Maximum number of fetched tweets of authenticated user (default: %(default)d)")
 argparser.add_argument('--debug', '-D', action='store_true', help="Enable debug output")
 subargparsers = argparser.add_subparsers(dest='command', help="Commands")
 
 tweetargparser = subargparsers.add_parser('gettweets', help="Get tweets. By default, get timeline beginning with Tweet ID from last run.")
 tweetargparser.add_argument('--favorites', '-f', action='store_true', help="Get user accounts favorites instead of timeline. Does not store tweets which are already stored in database.")
-tweetargparser.add_argument('--retweets', '-r', action='store_true', help="Get user accounts retweets instead of timeline. Does not store tweets which are already stored in database.")
 tweetargparser.add_argument('--own', '-o', action='store_true', help="Get user accounts tweets instead of timeline. Does not store tweets which are already stored in database.")
 tweetargparser.add_argument('--all', '-a', action='store_true', help="Shortcut for -fro - get favorites and own (re)tweets instead of timeline and store missing tweets in database.")
 
