@@ -150,9 +150,9 @@ def generate_embedding_dense_model(maxwords, vocabsize, units, layercnt, embeddi
     model.add(layers.Embedding(vocabsize, embedding_units, input_length=maxwords))
     model.add(layers.Flatten())
     for i in range(layercnt):
-        model.add(layers.Dense(units))
         if dropout is not None:
             model.add(layers.Dropout(dropout))
+        model.add(layers.Dense(units))
     model.add(layers.Dense(1))
 
     model.compile(
@@ -248,7 +248,7 @@ def cmd_train(args):
         callback_list.append(
                 callbacks.EarlyStopping(
                     monitor=args.early_stopping_metric,
-                    patience=1,
+                    patience=args.patience,
                     mode='auto'
                     )
                 )
@@ -322,6 +322,7 @@ trainingconfgroup.add_argument('--metric', '-M', default=['accuracy', 'mae'], na
 trainingconfgroup.add_argument('--epochs', '-e', default=20, type=int, help="Maximum number of training epochs (%(default)d). Training is aborted when overfitting appears. This can be disabled with --allow-overfitting.")
 trainingconfgroup.add_argument('--allow-overfitting', '-F', action='store_true', help="Continue to train, even when validation loss increases (overfitting).")
 trainingconfgroup.add_argument('--early-stopping-metric', '-S', default='val_loss', help="Metric monitored for early stopping of training to prevent overfitting.")
+trainingconfgroup.add_argument('--patience', '-p', default=1, type=int, help="How many epochs the early stop metric may get worse until training is aborted (default: %(default)s)")
 trainingconfgroup.add_argument('--validation-split', '-s', default=0.2, type=float, help="Fraction of data set used for model validation while training (default: %(default)0.1f).")
 trainingconfgroup.add_argument('--batch-size', '-b', default=32, type=int, help="Training batch size")
 
