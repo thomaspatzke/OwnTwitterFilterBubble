@@ -133,10 +133,13 @@ class PaddedSequencesTweetSequence(TweetSequenceBase):
 def generate_dense_model(vocabsize, units, layercnt, dropout, activation, final_activation, optimizer, loss, metrics):
     model = models.Sequential()
     for i in range(layercnt):
-        model.add(layers.Dense(units, input_dim=vocabsize))
+        if i == 0:
+            model.add(layers.Dense(units, activation=activation, input_dim=vocabsize))
+        else:
+            model.add(layers.Dense(units, activation=activation))
         if dropout is not None:
             model.add(layers.Dropout(dropout))
-    model.add(layers.Dense(1))
+    model.add(layers.Dense(1, activation=final_activation))
 
     model.compile(
             optimizer=optimizer,
@@ -145,15 +148,17 @@ def generate_dense_model(vocabsize, units, layercnt, dropout, activation, final_
             )
     return model
 
-def generate_embedding_dense_model(maxwords, vocabsize, units, layercnt, embedding_units, dropout, optimizer, loss, metrics):
+def generate_embedding_dense_model(maxwords, vocabsize, units, layercnt, embedding_units, dropout, activation, final_activation, optimizer, loss, metrics):
     model = models.Sequential()
     model.add(layers.Embedding(vocabsize, embedding_units, input_length=maxwords))
     model.add(layers.Flatten())
     for i in range(layercnt):
         if dropout is not None:
             model.add(layers.Dropout(dropout))
-        model.add(layers.Dense(units))
-    model.add(layers.Dense(1))
+        model.add(layers.Dense(units, activation=activation))
+    if dropout is not None:
+        model.add(layers.Dropout(dropout))
+    model.add(layers.Dense(1, activation=final_activation))
 
     model.compile(
             optimizer=optimizer,
@@ -161,13 +166,73 @@ def generate_embedding_dense_model(maxwords, vocabsize, units, layercnt, embeddi
             metrics=metrics
             )
     return model
-    pass
 
-def generate_gru_model(maxwords, vocabsize, units, layercnt, embedding_units, dropout, recurrent_dropout, optimizer, loss, metrics):
-    pass
+def generate_gru_model(maxwords, vocabsize, units, layercnt, recurrent_layercnt, embedding_units, recurrent_units, dropout, recurrent_dropout, recurrent_activation, activation, final_activation, optimizer, loss, metrics):
+    model = models.Sequential()
+    model.add(layers.Embedding(vocabsize, embedding_units, input_length=maxwords))
+    for i in range(recurrent_layercnt):
+        model.add(layers.GRU(recurrent_units, activation=recurrent_activation, dropout=dropout, recurrent_dropout=recurrent_dropout, return_sequences=(i < recurrent_layercnt - 1)))
+    for i in range(layercnt):
+        if dropout is not None:
+            model.add(layers.Dropout(dropout))
+        model.add(layers.Dense(units, activation=activation))
+    if dropout is not None:
+        model.add(layers.Dropout(dropout))
+    model.add(layers.Dense(1, activation=final_activation))
 
-def generate_lstm_model(maxwords, vocabsize, units, layercnt, embedding_units, dropout, recurrent_dropout, optimizer, loss, metrics):
-    pass
+    model.compile(
+            optimizer=optimizer,
+            loss=loss,
+            metrics=metrics
+            )
+    return model
+
+def generate_lstm_model(maxwords, vocabsize, units, layercnt, recurrent_layercnt, embedding_units, recurrent_units, dropout, recurrent_dropout, recurrent_activation, activation, final_activation, optimizer, loss, metrics):
+    model = models.Sequential()
+    model.add(layers.Embedding(vocabsize, embedding_units, input_length=maxwords))
+    for i in range(recurrent_layercnt):
+        model.add(layers.LSTM(recurrent_units, activation=recurrent_activation, dropout=dropout, recurrent_dropout=recurrent_dropout, return_sequences=(i < recurrent_layercnt - 1)))
+    for i in range(layercnt):
+        if dropout is not None:
+            model.add(layers.Dropout(dropout))
+        model.add(layers.Dense(units, activation=activation))
+    if dropout is not None:
+        model.add(layers.Dropout(dropout))
+    model.add(layers.Dense(1, activation=final_activation))
+
+    model.compile(
+            optimizer=optimizer,
+            loss=loss,
+            metrics=metrics
+            )
+    return model
+
+def generate_convnet_model(maxwords, vocabsize, units, layercnt, conv_layercnt, embedding_units, conv_filters, conv_window, pool_size, flatten_after_conv, dropout, conv_activation, activation, final_activation, optimizer, loss, metrics):
+    model = models.Sequential()
+    model.add(layers.Embedding(vocabsize, embedding_units, input_length=maxwords))
+    for i in range(conv_layercnt):
+        model.add(layers.Conv1D(conv_filters, conv_window, activation=conv_activation))
+        if i < conv_layercnt - 1:   # Max pooling until last layer
+            model.add(layers.MaxPool1D(pool_size))
+        else:                       # Layer after last conv layer prepares output for dense layers
+            if flatten_after_conv:
+                model.add(layers.Flatten())
+            else:
+                model.add(layers.GlobalMaxPool1D())
+    for i in range(layercnt):
+        if dropout is not None:
+            model.add(layers.Dropout(dropout))
+        model.add(layers.Dense(units, activation=activation))
+    if dropout is not None:
+        model.add(layers.Dropout(dropout))
+    model.add(layers.Dense(1, activation=final_activation))
+
+    model.compile(
+            optimizer=optimizer,
+            loss=loss,
+            metrics=metrics
+            )
+    return model
 
 # Dictionary of supported models with model name (corresponding to argument parser parameter name) to tuple
 # mappings. The tuples are defined as follows:
@@ -179,22 +244,27 @@ model_configs = {
         "dense": (
             OneHotTweetSequence,
             generate_dense_model,
-            ('words', 'units', 'layers', 'dropout', 'dense_activation', 'final_activation', 'optimizer', 'loss', 'metric')
+            ("words", "units", "layers", "dropout", "dense_activation", "final_activation", "optimizer", "loss", "metric")
             ),
         "embedding_dense": (
             PaddedSequencesTweetSequence,
             generate_embedding_dense_model,
-            (MODELARG_MAXLEN, 'words', 'units', 'layers', 'embedding_units', 'dropout', 'optimizer', 'loss', 'metric')
+            (MODELARG_MAXLEN, "words", "units", "layers", "embedding_units", "dropout", "dense_activation", "final_activation", "optimizer", "loss", "metric")
             ),
         "gru": (
             PaddedSequencesTweetSequence,
             generate_gru_model,
-            ('words', "units", "layers", "embedding_units", "words", "dropout", "recurrent_dropout", 'optimizer', 'loss', 'metric')
+            (MODELARG_MAXLEN, "words", "units", "layers", "recurrent_layers", "embedding_units", "recurrent_units", "dropout", "recurrent_dropout", "recurrent_activation", "dense_activation", "final_activation", "optimizer", "loss", "metric")
             ),
         "lstm": (
             PaddedSequencesTweetSequence,
             generate_lstm_model,
-            ('words', "units", "layers", "embedding_units", "words", "dropout", "recurrent_dropout", 'optimizer', 'loss', 'metric')
+            (MODELARG_MAXLEN, "words", "units", "layers", "recurrent_layers", "embedding_units", "recurrent_units", "dropout", "recurrent_dropout", "recurrent_activation", "dense_activation", "final_activation", "optimizer", "loss", "metric")
+            ),
+        "convnet": (
+            PaddedSequencesTweetSequence,
+            generate_convnet_model,
+            (MODELARG_MAXLEN, "words", "units", "layers", "conv_layers", "embedding_units", "conv_filters", "conv_window", "pool_size", "flatten_after_conv", "dropout", "conv_activation", "dense_activation", "final_activation", "optimizer", "loss", "metric")
             ),
         }
 
@@ -301,19 +371,29 @@ trainargparser.add_argument('--output', '-o', help="Store model with trained wei
 modelconfgroup = trainargparser.add_argument_group(title="Model Configuration", description="Selection and configuration of the network model.")
 modelconfgroup.add_argument('--words', '-w', default=1000, type=int, help="Vocabulary size. Most common words are used, remaining are ignored.")
 modelconfgroup.add_argument('--layers', '-l', default=1, type=int, help="Number of layers for models which support this setting (default: %(default)d)")
+modelconfgroup.add_argument('--recurrent-layers', '-rl', default=1, type=int, help="Number of recurrent layers (default: %(default)d)")
+modelconfgroup.add_argument('--conv-layers', '-cl', default=2, type=int, help="Number of convolutional/pooling layer pairs (default: %(default)d)")
 modelconfgroup.add_argument('--units', '-u', default=64, type=int, help="Number of units per dense layer (default: %(default)d)")
 modelconfgroup.add_argument('--embedding-units', '-eu', default=16, type=int, help="Number of units per dense layer (default: %(default)d)")
+modelconfgroup.add_argument('--recurrent-units', '-ru', default=32, type=int, help="Number of units per recurrent layer (default: %(default)d)")
+modelconfgroup.add_argument('--conv-filters', '-cf', default=32, type=int, help="Number of filters per convolutional layer (default: %(default)d)")
+modelconfgroup.add_argument('--conv-window', '-cw', default=7, type=int, help="Convolutional window size (default: %(default)d)")
+modelconfgroup.add_argument('--pool-size', '-P', default=2, type=int, help="Pooling window size (default: %(default)d)")
+modelconfgroup.add_argument('--flatten-after-conv', '-f', help="Use a Flatten layer instead of GlocalMaxPool1D after last convolutional layer")
 modelconfgroup.add_argument('--dropout', '-d', default=0.5, type=float, help="Dropout rate applied to input of dense and recurrent layers (default: %(default)0.1f).")
 modelconfgroup.add_argument('--recurrent-dropout', '-dr', default=0.5, type=float, help="Dropout rate applied to recurrent units ()default: %(default)0.1f).")
 modelconfgroup.add_argument('--dense-activation', '-a', default='relu', help="Activation function of dense layers (default: %(default)s)")
 modelconfgroup.add_argument('--final-activation', '-fa', default='sigmoid', help="Activation function of last dense layer (default: %(default)s)")
+modelconfgroup.add_argument('--recurrent-activation', '-ra', default='relu', help="Activation function of recurrent layers (default: %(default)s)")
+modelconfgroup.add_argument('--conv-activation', '-ca', default='relu', help="Activation function of convolutional layers (default: %(default)s)")
 
 
 modelselection = modelconfgroup.add_mutually_exclusive_group(required=True)
 modelselection.add_argument('--dense', action='store_true', help="Simple dense network with number of units per layer defined by --units. Number of layers can be specified with --layers.")
 modelselection.add_argument('--embedding-dense', action='store_true', help="Embedding layer (output dimension specified with --embedding-dimension) followed by dense layer(s) (count specified by --layers) with units per dense layer specified by --units.")
-modelselection.add_argument('--gru', action='store_true', help="Word embedding layer (output dimension specified with --embedding-dimension) followed by one or multiple GRU layers (--layers) with number of units specified by --units.")
-modelselection.add_argument('--lstm', action='store_true', help="Word embedding layer (output dimension specified with --embedding-dimension) followed by one or multiple LSTM layers (--layers) with number of units specified by --units.")
+modelselection.add_argument('--gru', action='store_true', help="Word embedding layer (output dimension specified with --embedding-dimension) followed by one or multiple GRU layers (--recurrent-layers) with number of units specified by --recurrent-units. Finally, multiple dense layers (--layers, --units) may appear.")
+modelselection.add_argument('--lstm', action='store_true', help="Word embedding layer (output dimension specified with --embedding-dimension) followed by one or multiple LSTM layers (--recurrent-layers) with number of units specified by --recurrent-units. Finally, multiple dense layers (--layers, --units) may appear.")
+modelselection.add_argument('--convnet', action='store_true', help="Word embedding layer (output dimension specified with --embedding-dimension) followed by one or multiple 1D convolutional layers (--conv-layers) with number of filters specified by --conv-filters and a convolution window defined by --conv-window. The pooling size of pooling layers between convolutional layers is defined with --pool-size. Finally, multiple dense layers (--layers, --units) may appear.")
 
 trainingconfgroup = trainargparser.add_argument_group(title="Training Configuration", description="Configuration of training parameters.")
 trainingconfgroup.add_argument('--optimizer', '-O', default='rmsprop', help="Selection of optimizer algorithm (default: %(default)s)")
