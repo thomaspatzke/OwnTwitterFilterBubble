@@ -10,6 +10,9 @@ import tweepy
 import logging
 import itertools
 import math
+import pickle
+import re
+import json
 from keras import utils, preprocessing, models, layers, callbacks
 from keras.preprocessing.text import Tokenizer
 import numpy as np
@@ -79,10 +82,22 @@ class TweetSequenceBase(utils.Sequence):
 
     The class further calculates the label according to the given scoring parameters.
     """
-    def __init__(self, tweets, batch_size, words, favorite_score, retweet_score, owntweet_score):
+    def __init__(self, tweets, words=20000, exclude_urls=False, batch_size=32, favorite_score=0.9, retweet_score=1.0, owntweet_score=1.0, serialized_tokenizer=None):
         tweet_texts = [ tweet['text'] for tweet in tweets ]
-        tokenizer = Tokenizer(words)
-        tokenizer.fit_on_texts(tweet_texts)
+        tweet_ids = [ tweet['id'] for tweet in tweets ]
+        self.first_id = min(tweet_ids)
+        self.last_id = max(tweet_ids)
+        if exclude_urls:
+            reURL = re.compile("https?://\S+")
+            for i, tweet in enumerate(tweet_texts):
+                tweet_texts[i] = reURL.sub("", tweet)
+                
+        if serialized_tokenizer is None:
+            tokenizer = Tokenizer(num_words=words)
+            tokenizer.fit_on_texts(tweet_texts)
+        else:
+            tokenizer = pickle.loads(serialized_tokenizer)
+        self.tokenizer = tokenizer
         self.x = self.create_input_sequences(tokenizer, tweet_texts)
         self.y = [
                 max([
@@ -114,6 +129,13 @@ class TweetSequenceBase(utils.Sequence):
 
     def max_len(self):
         return self.x.shape[1]
+
+    def dump_tokenizer(self):
+        return pickle.dumps(self.tokenizer)
+
+    def dump_dictionary(self):
+        return [ k for k, v in sorted(self.tokenizer.word_index.items(), key=lambda i: i[1])]
+        
 
 class OneHotTweetSequence(TweetSequenceBase):
     """Create an one-hot encoded sequence per Tweet."""
@@ -288,7 +310,7 @@ def cmd_gettweets(args):
 def cmd_train(args):
     # Get training data and initialize input generator
     dbc = db.cursor()
-    dbc.execute("SELECT text, favorite, retweet, own FROM tweets")
+    dbc.execute("SELECT id, text, favorite, retweet, own FROM tweets")
     tweets = dbc.fetchall()
     dbc.close()
     logger.info("Training data contains %d tweets", len(tweets))
@@ -296,8 +318,11 @@ def cmd_train(args):
     # Select model_config chosen by model selection argument
     model_config = model_configs[next(filter(lambda k: getattr(args, k), model_configs.keys()))]
     # Extract input and model generator, create parameter list and generate model
-    input_generator = model_config[0](tweets, args.batch_size, args.words, args.score_favorite, args.score_retweet, args.score_owntweet)
+    input_generator = model_config[0](tweets, args.words, args.exclude_urls, args.batch_size, args.score_favorite, args.score_retweet, args.score_owntweet)
     logger.debug("Input generator: %s", input_generator.name)
+    if args.print_dictionary:
+        for i, w in enumerate(input_generator.dump_dictionary()):
+            print("%10d | %s" % (i, w))
     model_generator = model_config[1]
     logger.debug("Model generator: %s", model_generator.__name__)
     model_args = []
@@ -323,13 +348,28 @@ def cmd_train(args):
                     )
                 )
     if args.output is not None:
+        # save best model from training
         callback_list.append(
                 callbacks.ModelCheckpoint(
-                    filepath=args.output,
+                    filepath=args.output + ".h5",
                     monitor=args.early_stopping_metric,
                     save_best_only=True
                     )
                 )
+
+        # save tokenizer
+        f = open(args.output + ".tok", "wb")
+        f.write(input_generator.dump_tokenizer())
+        f.close()
+
+        # save state
+        f = open(args.output + ".state", "w")
+        json.dump({
+            "first_tweet": input_generator.first_id,
+            "last_tweet": input_generator.last_id,
+            "sequencer": input_generator.__class__.__name__
+            }, f)
+        f.close()
 
     # Train model
     x = input_generator.get_x()
@@ -344,10 +384,43 @@ def cmd_train(args):
             verbose=1
             )
 
+def cmd_predict(args):
+    prefix = args.prefix[0]
+
+    # load state
+    f = open(prefix + ".state", "r")
+    state = json.load(f)
+    f.close()
+
+    # load tokenizer
+    f = open(prefix + ".tok", "rb")
+    serialized_tokenizer = f.read()
+    f.close()
+
+    # load model
+    model = models.load_model(prefix + ".h5")
+    model.summary()
+
+    # Get training data and initialize input generator
+    dbc = db.cursor()
+    dbc.execute("SELECT id, text, favorite, retweet, own FROM tweets WHERE id > ?", (state['last_tweet'], ))
+    tweets = dbc.fetchall()
+    dbc.close()
+    logger.info("Predicting most interesting from %d tweets", len(tweets))
+
+    # Initiate input generator
+    input_generator_class = globals()[state['sequencer']]
+    logger.debug("Input generator class: %s", input_generator_class)
+    if not isinstance(input_generator_class, TweetSequenceBase):
+        ValueError("State file 'sequencer' must name TweetSequenceBase subclass")
+    input_generator = input_generator_class(tweets, serialized_tokenizer=serialized_tokenizer)
+
 ### Main program ###
 argparser = argparse.ArgumentParser(description="Your Own Twitter Filter Bubble")
 argparser.add_argument("--database", "-d", default='tweets.db', help="SQLite database used internally to store Tweets. Will be created if not already existing. Default: %(default)s")
 argparser.add_argument('--debug', '-D', action='store_true', help="Enable debug output")
+argparser.add_argument('--print-dictionary', '-pd', action='store_true', help="Print dictionary generated by tokenizer from tweets")
+argparser.add_argument('--exclude-urls', '-u', action='store_true', help="Exclude URLs from dictionary")
 subargparsers = argparser.add_subparsers(dest='command', help="Commands")
 
 tweetargparser = subargparsers.add_parser('gettweets', help="Get tweets. By default, get timeline beginning with Tweet ID from last run.")
@@ -366,10 +439,10 @@ tweetargparser.add_argument('--all', '-a', action='store_true', help="Shortcut f
 
 trainargparser = subargparsers.add_parser('train', help="Train neuronal networks with aquired tweet data.")
 trainargparser.add_argument('--config', '-c', type=open, action=LoadFromFile, help="Training configuration file")
-trainargparser.add_argument('--output', '-o', help="Store model with trained weights in this file. Model is dropped after training if not specified.")
+trainargparser.add_argument('--output', '-o', help="File name prefix for stored model (.h5), configuration (.tok) and state (.state)")
 
 modelconfgroup = trainargparser.add_argument_group(title="Model Configuration", description="Selection and configuration of the network model.")
-modelconfgroup.add_argument('--words', '-w', default=1000, type=int, help="Vocabulary size. Most common words are used, remaining are ignored.")
+modelconfgroup.add_argument('--words', '-w', default=20000, type=int, help="Vocabulary size. Most common words are used, remaining are ignored.")
 modelconfgroup.add_argument('--layers', '-l', default=1, type=int, help="Number of layers for models which support this setting (default: %(default)d)")
 modelconfgroup.add_argument('--recurrent-layers', '-rl', default=1, type=int, help="Number of recurrent layers (default: %(default)d)")
 modelconfgroup.add_argument('--conv-layers', '-cl', default=2, type=int, help="Number of convolutional/pooling layer pairs (default: %(default)d)")
@@ -379,7 +452,7 @@ modelconfgroup.add_argument('--recurrent-units', '-ru', default=32, type=int, he
 modelconfgroup.add_argument('--conv-filters', '-cf', default=32, type=int, help="Number of filters per convolutional layer (default: %(default)d)")
 modelconfgroup.add_argument('--conv-window', '-cw', default=7, type=int, help="Convolutional window size (default: %(default)d)")
 modelconfgroup.add_argument('--pool-size', '-P', default=2, type=int, help="Pooling window size (default: %(default)d)")
-modelconfgroup.add_argument('--flatten-after-conv', '-f', help="Use a Flatten layer instead of GlocalMaxPool1D after last convolutional layer")
+modelconfgroup.add_argument('--flatten-after-conv', '-f', action='store_true', help="Use a Flatten layer instead of GlocalMaxPool1D after last convolutional layer")
 modelconfgroup.add_argument('--dropout', '-d', default=0.5, type=float, help="Dropout rate applied to input of dense and recurrent layers (default: %(default)0.1f).")
 modelconfgroup.add_argument('--recurrent-dropout', '-dr', default=0.5, type=float, help="Dropout rate applied to recurrent units ()default: %(default)0.1f).")
 modelconfgroup.add_argument('--dense-activation', '-a', default='relu', help="Activation function of dense layers (default: %(default)s)")
@@ -410,6 +483,10 @@ scoregroup = trainargparser.add_argument_group(title="Tweet Scoring", descriptio
 scoregroup.add_argument('--score-owntweet', '-so', default=1.0, type=float, help="Score of own tweets. (%(default)0.1f)")
 scoregroup.add_argument('--score-retweet', '-sr', default=1.0, type=float, help="Score of retweets. (%(default)0.1f)")
 scoregroup.add_argument('--score-favorite', '-sf', default=0.9, type=float, help="Score of favorited tweets. (%(default)0.1f)")
+
+predictargparser = subargparsers.add_parser('predict', help="Predict interesting Tweets with given trained model and Tweet database.")
+predictargparser.add_argument('prefix', nargs=1, help="Prefix of model, tokenizer and state files stored previously by train command")
+predictargparser.add_argument('--min-score', '-s', type=float, default=0.8, help="Tweets scored with this or greater are interesting (default: %(default)1.1f)")
 
 args = argparser.parse_args()
 if args.debug:
