@@ -82,7 +82,7 @@ class TweetSequenceBase(utils.Sequence):
 
     The class further calculates the label according to the given scoring parameters.
     """
-    def __init__(self, tweets, words=20000, exclude_urls=False, batch_size=32, favorite_score=0.9, retweet_score=1.0, owntweet_score=1.0, serialized_tokenizer=None):
+    def __init__(self, tweets, words, exclude_urls, exclude_mentions, exclude_answers, batch_size, favorite_score, retweet_score, owntweet_score):
         tweet_texts = [ tweet['text'] for tweet in tweets ]
         tweet_ids = [ tweet['id'] for tweet in tweets ]
         self.first_id = min(tweet_ids)
@@ -91,14 +91,23 @@ class TweetSequenceBase(utils.Sequence):
             reURL = re.compile("https?://\S+")
             for i, tweet in enumerate(tweet_texts):
                 tweet_texts[i] = reURL.sub("", tweet)
+        if exclude_mentions:
+            reMention = re.compile("@[a-z0-9_]+", re.IGNORECASE)
+            for i, tweet in enumerate(tweet_texts):
+                tweet_texts[i] = reMention.sub("", tweet)
+        if exclude_answers:
+            before = len(tweet_texts)
+            tweet_texts = list(filter(lambda tweet: not tweet.startswith("@"), tweet_texts))
+            after = len(tweet_texts)
+            if after < before:
+                logger.debug("Reduced input set from %d to %d tweets by removing answers" % (before, after))
+            else:
+                logger.warn("Answer filtering hasn't reduced input set.")
                 
-        if serialized_tokenizer is None:
-            tokenizer = Tokenizer(num_words=words)
-            tokenizer.fit_on_texts(tweet_texts)
-        else:
-            tokenizer = pickle.loads(serialized_tokenizer)
+        tokenizer = Tokenizer(num_words=words)
+        tokenizer.fit_on_texts(tweet_texts)
         self.tokenizer = tokenizer
-        self.x = self.create_input_sequences(tokenizer, tweet_texts)
+        self.update_input(tweet_texts)
         self.y = [
                 max([
                     tweet['favorite'] * favorite_score,
@@ -109,8 +118,15 @@ class TweetSequenceBase(utils.Sequence):
                 ]
         self.batch_size = batch_size
 
-    def create_input_sequences(self, tokenizer, tweets):
+    def save(self, f):
+        pickle.dump(self, f)
+
+    def create_input_sequences(self, tweets):
         raise NotImplementedError("Input sequence generation is not implemented in TweetSequenceBase class")
+
+    def update_input(self, tweets):
+        """Update input sequences from array of tweet strings"""
+        self.x = self.create_input_sequences(tweets)
 
     def __len__(self):
         return math.ceil(len(self.x) / self.batch_size)
@@ -135,21 +151,21 @@ class TweetSequenceBase(utils.Sequence):
 
     def dump_dictionary(self):
         return [ k for k, v in sorted(self.tokenizer.word_index.items(), key=lambda i: i[1])]
-        
 
 class OneHotTweetSequence(TweetSequenceBase):
     """Create an one-hot encoded sequence per Tweet."""
     name = "One hot input generator"
-    def create_input_sequences(self, tokenizer, tweets):
-        return tokenizer.texts_to_matrix(tweets, mode='binary')
+    def create_input_sequences(self, tweets):
+        return self.tokenizer.texts_to_matrix(tweets, mode='binary')
 
 class PaddedSequencesTweetSequence(TweetSequenceBase):
     """Create padded word-index sequences for each Tweet"""
     name = "Padded word-index sequence generator"
-    def create_input_sequences(self, tokenizer, tweets):
-        return preprocessing.sequence.pad_sequences(
-                tokenizer.texts_to_sequences(tweets)
-                )
+    def create_input_sequences(self, tweets):
+        try:
+            return preprocessing.sequence.pad_sequences(self.tokenizer.texts_to_sequences(tweets), self.max_len())
+        except AttributeError:
+            return preprocessing.sequence.pad_sequences(self.tokenizer.texts_to_sequences(tweets))
 
 # Model generator functions
 def generate_dense_model(vocabsize, units, layercnt, dropout, activation, final_activation, optimizer, loss, metrics):
@@ -318,7 +334,7 @@ def cmd_train(args):
     # Select model_config chosen by model selection argument
     model_config = model_configs[next(filter(lambda k: getattr(args, k), model_configs.keys()))]
     # Extract input and model generator, create parameter list and generate model
-    input_generator = model_config[0](tweets, args.words, args.exclude_urls, args.batch_size, args.score_favorite, args.score_retweet, args.score_owntweet)
+    input_generator = model_config[0](tweets, args.words, args.exclude_urls, args.exclude_mentions, args.exclude_answers, args.batch_size, args.score_favorite, args.score_retweet, args.score_owntweet)
     logger.debug("Input generator: %s", input_generator.name)
     if args.print_dictionary:
         for i, w in enumerate(input_generator.dump_dictionary()):
@@ -357,9 +373,9 @@ def cmd_train(args):
                     )
                 )
 
-        # save tokenizer
+        # save input generator with tokenizer
         f = open(args.output + ".tok", "wb")
-        f.write(input_generator.dump_tokenizer())
+        input_generator.save(f)
         f.close()
 
         # save state
@@ -367,7 +383,6 @@ def cmd_train(args):
         json.dump({
             "first_tweet": input_generator.first_id,
             "last_tweet": input_generator.last_id,
-            "sequencer": input_generator.__class__.__name__
             }, f)
         f.close()
 
@@ -392,35 +407,39 @@ def cmd_predict(args):
     state = json.load(f)
     f.close()
 
-    # load tokenizer
+    # Restore input generator
     f = open(prefix + ".tok", "rb")
-    serialized_tokenizer = f.read()
+    input_generator = pickle.load(f)
     f.close()
+    if args.print_dictionary:
+        for i, w in enumerate(input_generator.dump_dictionary()):
+            print("%10d | %s" % (i, w))
 
     # load model
     model = models.load_model(prefix + ".h5")
     model.summary()
 
-    # Get training data and initialize input generator
+    # Get training data
     dbc = db.cursor()
     dbc.execute("SELECT id, text, favorite, retweet, own FROM tweets WHERE id > ?", (state['last_tweet'], ))
     tweets = dbc.fetchall()
+    tweet_texts = [ tweet['text'] for tweet in tweets ]
     dbc.close()
     logger.info("Predicting most interesting from %d tweets", len(tweets))
 
-    # Initiate input generator
-    input_generator_class = globals()[state['sequencer']]
-    logger.debug("Input generator class: %s", input_generator_class)
-    if not isinstance(input_generator_class, TweetSequenceBase):
-        ValueError("State file 'sequencer' must name TweetSequenceBase subclass")
-    input_generator = input_generator_class(tweets, serialized_tokenizer=serialized_tokenizer)
+    # Initiate input generator and predict scores
+    input_generator.update_input(tweet_texts)
+    y = model.predict(input_generator.get_x())
+
+    for tweet, score in zip(tweet_texts, y):
+        if score >= args.min_score:
+            print("%1.2f | %s" % (score, tweet))
 
 ### Main program ###
 argparser = argparse.ArgumentParser(description="Your Own Twitter Filter Bubble")
 argparser.add_argument("--database", "-d", default='tweets.db', help="SQLite database used internally to store Tweets. Will be created if not already existing. Default: %(default)s")
 argparser.add_argument('--debug', '-D', action='store_true', help="Enable debug output")
 argparser.add_argument('--print-dictionary', '-pd', action='store_true', help="Print dictionary generated by tokenizer from tweets")
-argparser.add_argument('--exclude-urls', '-u', action='store_true', help="Exclude URLs from dictionary")
 subargparsers = argparser.add_subparsers(dest='command', help="Commands")
 
 tweetargparser = subargparsers.add_parser('gettweets', help="Get tweets. By default, get timeline beginning with Tweet ID from last run.")
@@ -440,6 +459,11 @@ tweetargparser.add_argument('--all', '-a', action='store_true', help="Shortcut f
 trainargparser = subargparsers.add_parser('train', help="Train neuronal networks with aquired tweet data.")
 trainargparser.add_argument('--config', '-c', type=open, action=LoadFromFile, help="Training configuration file")
 trainargparser.add_argument('--output', '-o', help="File name prefix for stored model (.h5), configuration (.tok) and state (.state)")
+
+inputgroup = trainargparser.add_argument_group(title="Input Configuration", description="Modify input data")
+inputgroup.add_argument('--exclude-urls', '-xu', action='store_true', help="Exclude URLs from dictionary")
+inputgroup.add_argument('--exclude-mentions', '-xm', action='store_true', help="Exclude mentions (@handle) from dictionary")
+inputgroup.add_argument('--exclude-answers', '-xa', action='store_true', help="Exclude answers (tweets beginning with @) from training set")
 
 modelconfgroup = trainargparser.add_argument_group(title="Model Configuration", description="Selection and configuration of the network model.")
 modelconfgroup.add_argument('--words', '-w', default=20000, type=int, help="Vocabulary size. Most common words are used, remaining are ignored.")
