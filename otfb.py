@@ -495,7 +495,7 @@ modelselection.add_argument('--convnet', action='store_true', help="Word embeddi
 trainingconfgroup = trainargparser.add_argument_group(title="Training Configuration", description="Configuration of training parameters.")
 trainingconfgroup.add_argument('--optimizer', '-O', default='rmsprop', help="Selection of optimizer algorithm (default: %(default)s)")
 trainingconfgroup.add_argument('--loss', '-L', default='mse', help="Selection of loss function (default: %(default)s)")
-trainingconfgroup.add_argument('--metric', '-M', default=['accuracy', 'mae'], nargs='*', help="Selection of metrics (default: %(default)s)")
+trainingconfgroup.add_argument('--metric', '-M', default=['mae'], nargs='*', help="Selection of metrics (default: %(default)s)")
 trainingconfgroup.add_argument('--epochs', '-e', default=20, type=int, help="Maximum number of training epochs (%(default)d). Training is aborted when overfitting appears. This can be disabled with --allow-overfitting.")
 trainingconfgroup.add_argument('--allow-overfitting', '-F', action='store_true', help="Continue to train, even when validation loss increases (overfitting).")
 trainingconfgroup.add_argument('--early-stopping-metric', '-S', default='val_loss', help="Metric monitored for early stopping of training to prevent overfitting.")
@@ -506,7 +506,7 @@ trainingconfgroup.add_argument('--batch-size', '-b', default=32, type=int, help=
 scoregroup = trainargparser.add_argument_group(title="Tweet Scoring", description="Tweet classification is based on a score between 0 and 1 (less interesting < more interesting). Training can distinguish scores between own tweets, retweets and favorites.")
 scoregroup.add_argument('--score-owntweet', '-so', default=1.0, type=float, help="Score of own tweets. (%(default)0.1f)")
 scoregroup.add_argument('--score-retweet', '-sr', default=1.0, type=float, help="Score of retweets. (%(default)0.1f)")
-scoregroup.add_argument('--score-favorite', '-sf', default=0.9, type=float, help="Score of favorited tweets. (%(default)0.1f)")
+scoregroup.add_argument('--score-favorite', '-sf', default=1.0, type=float, help="Score of favorited tweets. (%(default)0.1f)")
 
 predictargparser = subargparsers.add_parser('predict', help="Predict interesting Tweets with given trained model and Tweet database.")
 predictargparser.add_argument('prefix', nargs=1, help="Prefix of model, tokenizer and state files stored previously by train command")
