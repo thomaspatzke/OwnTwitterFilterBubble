@@ -5,6 +5,7 @@
 
 import sys
 import argparse
+from datetime import datetime
 import sqlite3
 import tweepy
 import logging
@@ -28,6 +29,13 @@ class LoadFromFile (argparse.Action):
     def __call__ (self, parser, namespace, values, option_string = None):
         with values as f:
             parser.parse_args(f.read().split(), namespace)
+
+def datetimearg(dtstr):
+    """Used by argument parser for parsing of dates and times."""
+    try:
+        return datetime.strptime(dtstr, "%Y-%m-%d")     # first try to parse date only
+    except ValueError:
+        return datetime.strptime(dtstr, "%Y-%m-%d %H:%M:%S")     # user may have given a time, try this
 
 def get_twitter_api():
     """Get an authenticated instance of a Tweepy API interface"""
@@ -108,14 +116,20 @@ class TweetSequenceBase(utils.Sequence):
         tokenizer.fit_on_texts(tweet_texts)
         self.tokenizer = tokenizer
         self.update_input(tweet_texts)
-        self.y = [
-                max([
-                    tweet['favorite'] * favorite_score,
-                    tweet['retweet'] * retweet_score,
-                    tweet['own'] * owntweet_score
-                    ])
-                for tweet in tweets
+        self.y = np.array(
+                [
+                    max([
+                        tweet['favorite'] * favorite_score,
+                        tweet['retweet'] * retweet_score,
+                        tweet['own'] * owntweet_score
+                        ])
+                    for tweet in tweets
                 ]
+                )
+        hist = np.histogram(self.y)
+        logger.info("Input label histogram:")
+        for c, i in zip(hist[0], hist[1]):
+            print("Count >= %.2f = %d" % (i, c))
         self.batch_size = batch_size
 
     def save(self, f):
@@ -127,6 +141,7 @@ class TweetSequenceBase(utils.Sequence):
     def update_input(self, tweets):
         """Update input sequences from array of tweet strings"""
         self.x = self.create_input_sequences(tweets)
+        self.y = None
 
     def __len__(self):
         return math.ceil(len(self.x) / self.batch_size)
@@ -326,7 +341,10 @@ def cmd_gettweets(args):
 def cmd_train(args):
     # Get training data and initialize input generator
     dbc = db.cursor()
-    dbc.execute("SELECT id, text, favorite, retweet, own FROM tweets")
+    if args.hold_out is None:
+        dbc.execute("SELECT id, text, favorite, retweet, own FROM tweets")
+    else:
+        dbc.execute("SELECT id, time, text, favorite, retweet, own FROM tweets WHERE time < ?", (args.hold_out, ))
     tweets = dbc.fetchall()
     dbc.close()
     logger.info("Training data contains %d tweets", len(tweets))
@@ -421,19 +439,23 @@ def cmd_predict(args):
 
     # Get training data
     dbc = db.cursor()
-    dbc.execute("SELECT id, text, favorite, retweet, own FROM tweets WHERE id > ?", (state['last_tweet'], ))
-    tweets = dbc.fetchall()
-    tweet_texts = [ tweet['text'] for tweet in tweets ]
+    if args.start_time is None:
+        dbc.execute("SELECT id, time, text, favorite, retweet, own FROM tweets WHERE id > ?", (state['last_tweet'], ))
+    else:
+        dbc.execute("SELECT id, time, text, favorite, retweet, own FROM tweets WHERE time >= ?", (args.start_time, ))
+    tweets_dbc = dbc.fetchall()
+    tweets = [ tweet['text'] for tweet in tweets_dbc ]
+    times = [ tweet['time'] for tweet in tweets_dbc ]
     dbc.close()
-    logger.info("Predicting most interesting from %d tweets", len(tweets))
+    logger.info("Predicting most interesting from %d tweets", len(tweets_dbc))
 
     # Initiate input generator and predict scores
-    input_generator.update_input(tweet_texts)
+    input_generator.update_input(tweets)
     y = model.predict(input_generator.get_x())
 
-    for tweet, score in zip(tweet_texts, y):
+    for tweet, time, score in zip(tweets, times, y):
         if score >= args.min_score:
-            print("%1.2f | %s" % (score, tweet))
+            print("%1.2f | %19s | %s" % (score, time, tweet))
 
 ### Main program ###
 argparser = argparse.ArgumentParser(description="Your Own Twitter Filter Bubble")
@@ -464,6 +486,7 @@ inputgroup = trainargparser.add_argument_group(title="Input Configuration", desc
 inputgroup.add_argument('--exclude-urls', '-xu', action='store_true', help="Exclude URLs from dictionary")
 inputgroup.add_argument('--exclude-mentions', '-xm', action='store_true', help="Exclude mentions (@handle) from dictionary")
 inputgroup.add_argument('--exclude-answers', '-xa', action='store_true', help="Exclude answers (tweets beginning with @) from training set")
+inputgroup.add_argument('--hold-out', '-ho', type=datetimearg, help="Exclude all tweets from the given date and time. This is used for definition of a test data set.")
 
 modelconfgroup = trainargparser.add_argument_group(title="Model Configuration", description="Selection and configuration of the network model.")
 modelconfgroup.add_argument('--words', '-w', default=20000, type=int, help="Vocabulary size. Most common words are used, remaining are ignored.")
@@ -510,6 +533,7 @@ scoregroup.add_argument('--score-favorite', '-sf', default=1.0, type=float, help
 
 predictargparser = subargparsers.add_parser('predict', help="Predict interesting Tweets with given trained model and Tweet database.")
 predictargparser.add_argument('prefix', nargs=1, help="Prefix of model, tokenizer and state files stored previously by train command")
+predictargparser.add_argument('--start-time', '-t', type=datetimearg, help="Predict all tweets from this date/time instead of last tweet used for training.")
 predictargparser.add_argument('--min-score', '-s', type=float, default=0.8, help="Tweets scored with this or greater are interesting (default: %(default)1.1f)")
 
 args = argparser.parse_args()
