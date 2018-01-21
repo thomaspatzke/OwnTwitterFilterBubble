@@ -373,6 +373,7 @@ def cmd_train(args):
 
     # Build callback list according to configuration
     callback_list = []
+    modelcheckpoint_args = dict()
     if not args.allow_overfitting:
         callback_list.append(
                 callbacks.EarlyStopping(
@@ -381,14 +382,16 @@ def cmd_train(args):
                     mode='auto'
                     )
                 )
+        modelcheckpoint_args.update({
+                "monitor": args.early_stopping_metric,
+                "save_best_only": True
+                })
     if args.output is not None:
         # save best model from training
+        modelcheckpoint_args.update({ "filepath": args.output + ".h5" })
+        logger.debug("ModelCheckpoint arguments: %s", modelcheckpoint_args)
         callback_list.append(
-                callbacks.ModelCheckpoint(
-                    filepath=args.output + ".h5",
-                    monitor=args.early_stopping_metric,
-                    save_best_only=True
-                    )
+                callbacks.ModelCheckpoint(**modelcheckpoint_args)
                 )
 
         # save input generator with tokenizer
@@ -523,8 +526,8 @@ trainingconfgroup.add_argument('--epochs', '-e', default=20, type=int, help="Max
 trainingconfgroup.add_argument('--allow-overfitting', '-F', action='store_true', help="Continue to train, even when validation loss increases (overfitting).")
 trainingconfgroup.add_argument('--early-stopping-metric', '-S', default='val_loss', help="Metric monitored for early stopping of training to prevent overfitting.")
 trainingconfgroup.add_argument('--patience', '-p', default=1, type=int, help="How many epochs the early stop metric may get worse until training is aborted (default: %(default)s)")
-trainingconfgroup.add_argument('--validation-split', '-s', default=0.2, type=float, help="Fraction of data set used for model validation while training (default: %(default)0.1f).")
 trainingconfgroup.add_argument('--batch-size', '-b', default=32, type=int, help="Training batch size")
+trainingconfgroup.add_argument('--validation-split', '-s', default=0.2, type=float, help="Fraction of data set used for model validation while training (default: %(default)0.1f).")
 
 scoregroup = trainargparser.add_argument_group(title="Tweet Scoring", description="Tweet classification is based on a score between 0 and 1 (less interesting < more interesting). Training can distinguish scores between own tweets, retweets and favorites.")
 scoregroup.add_argument('--score-owntweet', '-so', default=1.0, type=float, help="Score of own tweets. (%(default)0.1f)")
