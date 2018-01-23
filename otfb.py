@@ -17,6 +17,7 @@ import json
 from keras import utils, preprocessing, models, layers, callbacks
 from keras.preprocessing.text import Tokenizer
 import numpy as np
+import matplotlib.pyplot as plt
 
 logging.basicConfig()
 logger = logging.getLogger()
@@ -57,6 +58,11 @@ def tweet_sql_values_generator(tweets):
         yield (tweet.id, tweet.created_at, tweet.user.id, tweet.text, tweet.favorited, tweet.retweeted, tweet.user.id == user.id and not tweet.retweeted)
     logger.debug("Processed %d tweets", i)
 
+def log_histogram(a):
+    hist = np.histogram(a)
+    for c, i in zip(hist[0], hist[1]):
+        logger.debug("Count >= %.2f = %d" % (i, c))
+
 ### Tweet acquisition ###
 def get_timeline():
     """Get timeline. Fetch from latest stored tweet."""
@@ -90,7 +96,7 @@ class TweetSequenceBase(utils.Sequence):
 
     The class further calculates the label according to the given scoring parameters.
     """
-    def __init__(self, tweets, words, exclude_urls, exclude_mentions, exclude_answers, batch_size, favorite_score, retweet_score, owntweet_score):
+    def __init__(self, tweets, words, exclude_urls, exclude_mentions, exclude_answers, batch_size, favorite_score, retweet_score, owntweet_score, k):
         tweet_texts = [ tweet['text'] for tweet in tweets ]
         tweet_ids = [ tweet['id'] for tweet in tweets ]
         self.first_id = min(tweet_ids)
@@ -126,11 +132,24 @@ class TweetSequenceBase(utils.Sequence):
                     for tweet in tweets
                 ]
                 )
-        hist = np.histogram(self.y)
-        logger.info("Input label histogram:")
-        for c, i in zip(hist[0], hist[1]):
-            print("Count >= %.2f = %d" % (i, c))
+        logger.debug("Shapes: x=%s y=%s", self.x.shape, self.y.shape)
+        logger.debug("Input label histogram:")
+        log_histogram(self.y)
         self.batch_size = batch_size
+        self.k = k
+        if k is not None:
+            self.k_size = self.x.shape[0] // k
+            self.shuffle()
+
+    def shuffle(self):
+        p = np.random.permutation(len(self.x))
+        xs = np.zeros_like(self.x)
+        ys = np.zeros_like(self.y)
+        for i, j in enumerate(p):
+            xs[i] = self.x[j]
+            ys[i] = self.y[j]
+        self.x = xs
+        self.y = ys
 
     def save(self, f):
         pickle.dump(self, f)
@@ -152,11 +171,22 @@ class TweetSequenceBase(utils.Sequence):
                 np.array(self.y[i * self.batch_size:(i+1) * self.batch_size]),
                 )
 
-    def get_x(self):
-        return self.x
+    def get(self, a, val=None, i=None):
+        if val:                 # return validation set in k-fold-validation
+            return a[i * self.k_size:(i + 1) * self.k_size]
+        elif val == False:      # return partial train set in k-fold-validation
+            return np.concatenate([
+                a[:i * self.k_size],
+                a[(i + 1) * self.k_size:]
+                ])
+        else:                   # return complete data
+            return a
 
-    def get_y(self):
-        return self.y
+    def get_x(self, val=None, i=None):
+        return self.get(self.x, val, i)
+
+    def get_y(self, val=None, i=None):
+        return self.get(self.y, val, i)
 
     def max_len(self):
         return self.x.shape[1]
@@ -352,7 +382,7 @@ def cmd_train(args):
     # Select model_config chosen by model selection argument
     model_config = model_configs[next(filter(lambda k: getattr(args, k), model_configs.keys()))]
     # Extract input and model generator, create parameter list and generate model
-    input_generator = model_config[0](tweets, args.words, args.exclude_urls, args.exclude_mentions, args.exclude_answers, args.batch_size, args.score_favorite, args.score_retweet, args.score_owntweet)
+    input_generator = model_config[0](tweets, args.words, args.exclude_urls, args.exclude_mentions, args.exclude_answers, args.batch_size, args.score_favorite, args.score_retweet, args.score_owntweet, args.k_fold)
     logger.debug("Input generator: %s", input_generator.name)
     if args.print_dictionary:
         for i, w in enumerate(input_generator.dump_dictionary()):
@@ -408,17 +438,58 @@ def cmd_train(args):
         f.close()
 
     # Train model
-    x = input_generator.get_x()
-    y = input_generator.get_y()
-    logger.info("Score histogram: %s", str(np.histogram(y)))
-    model.fit(
-            x, y,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            callbacks=callback_list,
-            validation_split=args.validation_split,
-            verbose=1
-            )
+    if args.validation_split is not None:       # validation with split factor
+        x = input_generator.get_x()
+        y = input_generator.get_y()
+        model.fit(
+                x, y,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                callbacks=callback_list,
+                validation_split=args.validation_split,
+                verbose=1
+                )
+    elif args.k_fold is not None:               # k-fold validation
+        hists = dict()
+        k = args.k_fold
+        for i in range(k):
+            logger.info("Validating fold %d/%d", i + 1, k)
+            x = input_generator.get_x(False, i)
+            y = input_generator.get_y(False, i)
+            logger.debug("- Training label histogram:")
+            log_histogram(y)
+
+            x_val = input_generator.get_x(True, i)
+            y_val = input_generator.get_y(True, i)
+            logger.debug("- Validation label histogram:")
+            log_histogram(y_val)
+
+            hist = model.fit(
+                    x, y,
+                    validation_data=(x_val, y_val),
+                    epochs=args.epochs,
+                    batch_size=args.batch_size,
+                    verbose=1
+                    )
+            for metric, values in hist.history.items():
+                hists.setdefault(metric, []).append(values)
+            model = model_generator(*model_args)
+        means = { metric: np.mean(values, axis=0) for metric, values in hists.items() }
+        for metric, values in means.items():
+            plt.title(metric)
+            plt.plot(range(1, len(values) + 1), values)
+            plt.xlabel("Epoch")
+            plt.ylabel("Value")
+            plt.show()
+    else:                                       # training with full data set
+        x = input_generator.get_x()
+        y = input_generator.get_y()
+        model.fit(
+                x, y,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                verbose=1
+                )
 
 def cmd_predict(args):
     prefix = args.prefix[0]
@@ -510,7 +581,6 @@ modelconfgroup.add_argument('--final-activation', '-fa', default='sigmoid', help
 modelconfgroup.add_argument('--recurrent-activation', '-ra', default='relu', help="Activation function of recurrent layers (default: %(default)s)")
 modelconfgroup.add_argument('--conv-activation', '-ca', default='relu', help="Activation function of convolutional layers (default: %(default)s)")
 
-
 modelselection = modelconfgroup.add_mutually_exclusive_group(required=True)
 modelselection.add_argument('--dense', action='store_true', help="Simple dense network with number of units per layer defined by --units. Number of layers can be specified with --layers.")
 modelselection.add_argument('--embedding-dense', action='store_true', help="Embedding layer (output dimension specified with --embedding-dimension) followed by dense layer(s) (count specified by --layers) with units per dense layer specified by --units.")
@@ -522,12 +592,14 @@ trainingconfgroup = trainargparser.add_argument_group(title="Training Configurat
 trainingconfgroup.add_argument('--optimizer', '-O', default='rmsprop', help="Selection of optimizer algorithm (default: %(default)s)")
 trainingconfgroup.add_argument('--loss', '-L', default='mse', help="Selection of loss function (default: %(default)s)")
 trainingconfgroup.add_argument('--metric', '-M', default=['mae'], nargs='*', help="Selection of metrics (default: %(default)s)")
-trainingconfgroup.add_argument('--epochs', '-e', default=20, type=int, help="Maximum number of training epochs (%(default)d). Training is aborted when overfitting appears. This can be disabled with --allow-overfitting.")
+trainingconfgroup.add_argument('--epochs', '-e', default=10, type=int, help="Maximum number of training epochs (%(default)d). Training is aborted when overfitting appears. This can be disabled with --allow-overfitting.")
 trainingconfgroup.add_argument('--allow-overfitting', '-F', action='store_true', help="Continue to train, even when validation loss increases (overfitting).")
 trainingconfgroup.add_argument('--early-stopping-metric', '-S', default='val_loss', help="Metric monitored for early stopping of training to prevent overfitting.")
 trainingconfgroup.add_argument('--patience', '-p', default=1, type=int, help="How many epochs the early stop metric may get worse until training is aborted (default: %(default)s)")
 trainingconfgroup.add_argument('--batch-size', '-b', default=32, type=int, help="Training batch size")
-trainingconfgroup.add_argument('--validation-split', '-s', default=0.2, type=float, help="Fraction of data set used for model validation while training (default: %(default)0.1f).")
+validationgroup = trainingconfgroup.add_mutually_exclusive_group()
+validationgroup.add_argument('--validation-split', '-s', type=float, help="Fraction of data set used for model validation while training")
+validationgroup.add_argument('--k-fold', '-k', type=int, help="Do k-fold validation")
 
 scoregroup = trainargparser.add_argument_group(title="Tweet Scoring", description="Tweet classification is based on a score between 0 and 1 (less interesting < more interesting). Training can distinguish scores between own tweets, retweets and favorites.")
 scoregroup.add_argument('--score-owntweet', '-so', default=1.0, type=float, help="Score of own tweets. (%(default)0.1f)")
