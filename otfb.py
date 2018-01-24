@@ -61,7 +61,8 @@ def tweet_sql_values_generator(tweets):
 def log_histogram(a):
     hist = np.histogram(a)
     for c, i in zip(hist[0], hist[1]):
-        logger.debug("Count >= %.2f = %d" % (i, c))
+        if c > 0:
+            logger.debug("Count %.2f..%.2f = %d" % (i, i + 0.1, c))
 
 ### Tweet acquisition ###
 def get_timeline():
@@ -404,7 +405,7 @@ def cmd_train(args):
     # Build callback list according to configuration
     callback_list = []
     modelcheckpoint_args = dict()
-    if not args.allow_overfitting:
+    if args.early_stopping:
         callback_list.append(
                 callbacks.EarlyStopping(
                     monitor=args.early_stopping_metric,
@@ -475,11 +476,18 @@ def cmd_train(args):
                 hists.setdefault(metric, []).append(values)
             model = model_generator(*model_args)
         means = { metric: np.mean(values, axis=0) for metric, values in hists.items() }
+        i = 1
         for metric, values in means.items():
+            print("Metric %s: min=%.3f max=%.3f" % (metric, min(values), max(values)))
+            plt.subplot(2, 2, i)
+            i += 1
             plt.title(metric)
             plt.plot(range(1, len(values) + 1), values)
             plt.xlabel("Epoch")
             plt.ylabel("Value")
+        if args.output_graph:
+            plt.savefig(args.output_graph)
+        else:
             plt.show()
     else:                                       # training with full data set
         x = input_generator.get_x()
@@ -488,6 +496,7 @@ def cmd_train(args):
                 x, y,
                 epochs=args.epochs,
                 batch_size=args.batch_size,
+                callbacks=callback_list,
                 verbose=1
                 )
 
@@ -555,6 +564,7 @@ tweetargparser.add_argument('--all', '-a', action='store_true', help="Shortcut f
 trainargparser = subargparsers.add_parser('train', help="Train neuronal networks with aquired tweet data.")
 trainargparser.add_argument('--config', '-c', type=open, action=LoadFromFile, help="Training configuration file")
 trainargparser.add_argument('--output', '-o', help="File name prefix for stored model (.h5), configuration (.tok) and state (.state)")
+trainargparser.add_argument('--output-graph', '-og', help="File for graph output. Format is deduced from extension.")
 
 inputgroup = trainargparser.add_argument_group(title="Input Configuration", description="Modify input data")
 inputgroup.add_argument('--exclude-urls', '-xu', action='store_true', help="Exclude URLs from dictionary")
@@ -593,7 +603,7 @@ trainingconfgroup.add_argument('--optimizer', '-O', default='rmsprop', help="Sel
 trainingconfgroup.add_argument('--loss', '-L', default='mse', help="Selection of loss function (default: %(default)s)")
 trainingconfgroup.add_argument('--metric', '-M', default=['mae'], nargs='*', help="Selection of metrics (default: %(default)s)")
 trainingconfgroup.add_argument('--epochs', '-e', default=10, type=int, help="Maximum number of training epochs (%(default)d). Training is aborted when overfitting appears. This can be disabled with --allow-overfitting.")
-trainingconfgroup.add_argument('--allow-overfitting', '-F', action='store_true', help="Continue to train, even when validation loss increases (overfitting).")
+trainingconfgroup.add_argument('--early-stopping', '-E', action='store_true', help="Stop training when overfitting appears. Can be further configured with following parameters.")
 trainingconfgroup.add_argument('--early-stopping-metric', '-S', default='val_loss', help="Metric monitored for early stopping of training to prevent overfitting.")
 trainingconfgroup.add_argument('--patience', '-p', default=1, type=int, help="How many epochs the early stop metric may get worse until training is aborted (default: %(default)s)")
 trainingconfgroup.add_argument('--batch-size', '-b', default=32, type=int, help="Training batch size")
