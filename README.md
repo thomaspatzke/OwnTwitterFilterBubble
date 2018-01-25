@@ -18,6 +18,15 @@ All networks end with dense classifier layer(s). After successful training, the 
 
 This project was implemented with Python 3 and the [Keras](https://keras.io) deep learning library.
 
+## Installation
+
+Python3 with TK support (`apt-get install python3-tk`) is required. Further, the dependencies from *requirements.txt*
+must be installed with:
+
+```
+pip3 install -r requirements.txt
+```
+
 ## Usage
 
 There are three modes of operations:
