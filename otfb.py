@@ -100,6 +100,9 @@ class TweetSequenceBase(utils.Sequence):
     def __init__(self, tweets, words, exclude_urls, exclude_mentions, exclude_answers, batch_size, favorite_score, retweet_score, owntweet_score, k):
         tweet_texts = [ tweet['text'] for tweet in tweets ]
         tweet_ids = [ tweet['id'] for tweet in tweets ]
+        self.favorite_score = favorite_score
+        self.retweet_score = retweet_score
+        self.owntweet_score = owntweet_score
         self.first_id = min(tweet_ids)
         self.last_id = max(tweet_ids)
         if exclude_urls:
@@ -123,16 +126,7 @@ class TweetSequenceBase(utils.Sequence):
         tokenizer.fit_on_texts(tweet_texts)
         self.tokenizer = tokenizer
         self.update_input(tweet_texts)
-        self.y = np.array(
-                [
-                    max([
-                        tweet['favorite'] * favorite_score,
-                        tweet['retweet'] * retweet_score,
-                        tweet['own'] * owntweet_score
-                        ])
-                    for tweet in tweets
-                ]
-                )
+        self.update_output(tweets)
         logger.debug("Shapes: x=%s y=%s", self.x.shape, self.y.shape)
         logger.debug("Input label histogram:")
         log_histogram(self.y)
@@ -162,6 +156,35 @@ class TweetSequenceBase(utils.Sequence):
         """Update input sequences from array of tweet strings"""
         self.x = self.create_input_sequences(tweets)
         self.y = None
+
+    def update_output(self, tweets):
+        """
+        Update output score vector for a list of dicts with following keys:
+
+        * favorite: 1 if tweet was favorited
+        * retweet: 1 if tweet was retweeted by used account
+        * own: 1 if tweet was posted by used account
+        """
+        self.y = np.array(
+                [
+                    max([
+                        tweet['favorite'] * self.favorite_score,
+                        tweet['retweet'] * self.retweet_score,
+                        tweet['own'] * self.owntweet_score
+                        ])
+                    for tweet in tweets
+                ]
+                )
+
+    def update(self, tweets):
+        """
+        Update input generator from list of dicts with the following keys:
+
+        * text: Tweet text
+        * Remaining as in update_output
+        """
+        self.update_input([ tweet['text'] for tweet in tweets ])
+        self.update_output(tweets)
 
     def __len__(self):
         return math.ceil(len(self.x) / self.batch_size)
@@ -500,9 +523,7 @@ def cmd_train(args):
                 verbose=1
                 )
 
-def cmd_predict(args):
-    prefix = args.prefix[0]
-
+def load_data(prefix, start_time=None, print_dictionary=False):
     # load state
     f = open(prefix + ".state", "r")
     state = json.load(f)
@@ -512,7 +533,7 @@ def cmd_predict(args):
     f = open(prefix + ".tok", "rb")
     input_generator = pickle.load(f)
     f.close()
-    if args.print_dictionary:
+    if print_dictionary:
         for i, w in enumerate(input_generator.dump_dictionary()):
             print("%10d | %s" % (i, w))
 
@@ -527,10 +548,15 @@ def cmd_predict(args):
     else:
         dbc.execute("SELECT id, time, text, favorite, retweet, own FROM tweets WHERE time >= ?", (args.start_time, ))
     tweets_dbc = dbc.fetchall()
+    dbc.close()
+
+    return input_generator, model, tweets_dbc
+
+def cmd_predict(args):
+    input_generator, model, tweets_dbc = load_data(args.prefix[0], args.start_time, args.print_dictionary)
+    logger.info("Predicting most interesting from %d tweets", len(tweets_dbc))
     tweets = [ tweet['text'] for tweet in tweets_dbc ]
     times = [ tweet['time'] for tweet in tweets_dbc ]
-    dbc.close()
-    logger.info("Predicting most interesting from %d tweets", len(tweets_dbc))
 
     # Initiate input generator and predict scores
     input_generator.update_input(tweets)
@@ -539,6 +565,18 @@ def cmd_predict(args):
     for tweet, time, score in zip(tweets, times, y):
         if score >= args.min_score:
             print("%1.2f | %19s | %s" % (score, time, tweet))
+
+def cmd_evaluate(args):
+    input_generator, model, tweets_dbc = load_data(args.prefix[0], args.start_time, args.print_dictionary)
+    logger.info("Evaluating model performance against %d tweets", len(tweets_dbc))
+
+    # Initiate input generator and predict scores
+    input_generator.update(tweets_dbc)
+    res = model.evaluate(input_generator.get_x(), input_generator.get_y())
+
+    print("%20s | %s" % ("Metric", "Value"))
+    for metric, value in zip(model.metrics_names, res):
+        print("%20s | %.3f" % (metric, value))
 
 ### Main program ###
 argparser = argparse.ArgumentParser(description="Your Own Twitter Filter Bubble")
@@ -620,6 +658,10 @@ predictargparser = subargparsers.add_parser('predict', help="Predict interesting
 predictargparser.add_argument('prefix', nargs=1, help="Prefix of model, tokenizer and state files stored previously by train command")
 predictargparser.add_argument('--start-time', '-t', type=datetimearg, help="Predict all tweets from this date/time instead of last tweet used for training.")
 predictargparser.add_argument('--min-score', '-s', type=float, default=0.8, help="Tweets scored with this or greater are interesting (default: %(default)1.1f)")
+
+evaluateparser = subargparsers.add_parser('evaluate', help="Evaluate how well the predictions of a model perform against new or test datasets.")
+evaluateparser.add_argument('prefix', nargs=1, help="Prefix of model, tokenizer and state files stored previously by train command")
+evaluateparser.add_argument('--start-time', '-t', type=datetimearg, help="Predict all tweets from this date/time instead of last tweet used for training.")
 
 args = argparser.parse_args()
 if args.debug:
