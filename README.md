@@ -91,6 +91,9 @@ Run the following command to predict interesting Tweets:
 By default, all tweets after the trained set are predicted. You can set a prediction start time with `-t` and a minimum
 score with `-s`.
 
+If you use *evaluate* instead of *predict* subcommand, the predictions are evaluated against your real interaction and
+some metrics are calculated.
+
 ## Results
 
 First experiments with slightly more than 11.000 tweets and a 60:40 ratio of uninteresting to interesting tweets
